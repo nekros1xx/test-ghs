@@ -62,7 +62,8 @@ def main():
         if len(sys.argv) > 1 and "--help" not in sys.argv and "-h" not in sys.argv:
             is_offline = "--offline" in sys.argv
             is_version = "--version" in sys.argv
-            if not is_offline and not is_version:
+            is_history_cmd = "--flush" in sys.argv or "-F" in sys.argv or "--flush-org" in sys.argv or "--scanned" in sys.argv
+            if not is_offline and not is_version and not is_history_cmd:
                 print("\033[93m⚠  No GITHUB_TOKEN found.\033[0m")
                 if sys.platform == "win32":
                     print('   Set it with: set GITHUB_TOKEN=ghp_your_token_here')

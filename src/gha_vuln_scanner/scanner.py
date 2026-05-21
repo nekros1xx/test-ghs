@@ -2405,6 +2405,85 @@ def export_pdf(findings, outpath):
     print(f"\n  {C.GREEN}📄 PDF report: {outpath}{C.RESET}")
 
 
+# ════════════════════════════════════════════════════════════════════
+#  SCAN HISTORY — track scanned orgs to avoid re-scanning
+# ════════════════════════════════════════════════════════════════════
+
+_SCAN_HISTORY_DIR = os.path.join(os.path.expanduser('~'), '.ghascan')
+_SCAN_HISTORY_FILE = os.path.join(_SCAN_HISTORY_DIR, 'scan_history.json')
+
+
+def _load_scan_history():
+    """Load the scan history from disk. Returns dict {org_name: metadata}."""
+    if not os.path.exists(_SCAN_HISTORY_FILE):
+        return {}
+    try:
+        with open(_SCAN_HISTORY_FILE, encoding='utf-8') as fp:
+            return json.load(fp)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_scan_history(history):
+    """Persist scan history to disk."""
+    os.makedirs(_SCAN_HISTORY_DIR, exist_ok=True)
+    with open(_SCAN_HISTORY_FILE, 'w', encoding='utf-8') as fp:
+        json.dump(history, fp, indent=2, ensure_ascii=False)
+
+
+def _record_org_scan(org_name, repos_scanned, findings_count):
+    """Record that an org was scanned."""
+    history = _load_scan_history()
+    history[org_name.lower()] = {
+        'org': org_name,
+        'scanned_at': datetime.now().isoformat(),
+        'repos_scanned': repos_scanned,
+        'findings': findings_count,
+    }
+    _save_scan_history(history)
+
+
+def _is_org_scanned(org_name):
+    """Check if an org was already scanned. Returns metadata dict or None."""
+    history = _load_scan_history()
+    return history.get(org_name.lower())
+
+
+def _flush_org(org_name):
+    """Remove a single org from scan history. Returns True if it existed."""
+    history = _load_scan_history()
+    key = org_name.lower()
+    if key in history:
+        del history[key]
+        _save_scan_history(history)
+        return True
+    return False
+
+
+def _flush_all():
+    """Clear all scan history."""
+    _save_scan_history({})
+
+
+def _print_scanned_orgs():
+    """Print all scanned orgs with metadata."""
+    history = _load_scan_history()
+    if not history:
+        print(f"  {C.DIM}No orgs in scan history.{C.RESET}")
+        return
+    print(f"\n{C.BOLD}📋 Scanned organizations ({len(history)}):{C.RESET}\n")
+    for key in sorted(history.keys()):
+        entry = history[key]
+        org = entry.get('org', key)
+        ts = entry.get('scanned_at', '?')
+        repos = entry.get('repos_scanned', '?')
+        findings = entry.get('findings', '?')
+        color = C.GREEN if findings == 0 else C.YELLOW if isinstance(findings, int) and findings > 0 else ''
+        print(f"  {C.BOLD}{org}{C.RESET}  {C.DIM}{ts}{C.RESET}  "
+              f"repos:{repos}  {color}findings:{findings}{C.RESET}")
+    print()
+
+
 def scan_org(org_name, max_repos=500, min_stars=0, use_clone=True):
     print(f"\n{C.BOLD}🏢 Scanning organization: {org_name}{C.RESET}")
     print(f"   Fetching repo list (max {max_repos})...\n")
@@ -2426,6 +2505,7 @@ def scan_org(org_name, max_repos=500, min_stars=0, use_clone=True):
     print(f"   📦 Found {len(repos)} public repos\n")
     if not repos:
         print(f"   {C.RED}❌ No repos found for org {org_name}{C.RESET}")
+        _record_org_scan(org_name, 0, 0)
         return []
     active_repos = []
     for r in repos:
@@ -2491,6 +2571,7 @@ def scan_org(org_name, max_repos=500, min_stars=0, use_clone=True):
                 _print_finding_terminal(f)
         if ri < len(active_repos) - 1 and ri % 10 == 9:
             print(f"\n      {dim('⏳ Brief pause...')}"); time.sleep(2)
+    _record_org_scan(org_name, len(active_repos), len(all_findings))
     return all_findings
 
 
@@ -2517,12 +2598,33 @@ def main():
     parser.add_argument('--clone', action='store_true')
     parser.add_argument('--org', type=str, help='Scan all repos in a GitHub org')
     parser.add_argument('--org-max-repos', type=int, default=500)
+    parser.add_argument('--force', action='store_true', help='Re-scan org even if already scanned')
+    parser.add_argument('--flush', action='store_true', help='Flush all scanned orgs from history')
+    parser.add_argument('-F', '--flush-org', type=str, metavar='ORG', help='Flush a specific org from scan history')
+    parser.add_argument('--scanned', action='store_true', help='List all scanned orgs')
     parser.add_argument('-v', '--verbose', action='store_true')
     parser.add_argument('--verdict', nargs='+')
     parser.add_argument('--version', action='version', version=f'gha-vuln-scanner {__version__}')
     args = parser.parse_args()
 
     global _USE_CLONE, _CLONE_DIR
+
+    # ── Scan history management commands ───────────────────────────
+    if args.flush:
+        _flush_all()
+        print(f"  {C.GREEN}✓ Scan history flushed.{C.RESET}")
+        return
+
+    if args.flush_org:
+        if _flush_org(args.flush_org):
+            print(f"  {C.GREEN}✓ Flushed '{args.flush_org}' from scan history.{C.RESET}")
+        else:
+            print(f"  {C.YELLOW}⚠  '{args.flush_org}' not found in scan history.{C.RESET}")
+        return
+
+    if args.scanned:
+        _print_scanned_orgs()
+        return
 
     if args.offline:
         print(f"{C.BOLD}📂 Offline mode: {args.offline}{C.RESET}")
@@ -2550,6 +2652,15 @@ def main():
         os.makedirs(_CLONE_DIR, exist_ok=True)
 
     if args.org:
+        # Check if org was already scanned
+        if not args.force:
+            prev = _is_org_scanned(args.org)
+            if prev:
+                print(f"\n  {C.YELLOW}⚠  '{args.org}' already scanned on {prev.get('scanned_at', '?')}{C.RESET}")
+                print(f"     repos: {prev.get('repos_scanned', '?')}  findings: {prev.get('findings', '?')}")
+                print(f"     Use {C.BOLD}--force{C.RESET} to re-scan, or {C.BOLD}-F {args.org}{C.RESET} to flush it.\n")
+                return
+
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         out = args.output or f"gha_scan_org_{args.org}_{ts}.json"
         md_path = _md_path_from_json(out)
