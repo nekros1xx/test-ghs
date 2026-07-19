@@ -34,25 +34,36 @@ if ! dc ps --status running --services 2>/dev/null | grep -q '^worker$'; then
   dc up -d redis worker >/dev/null || { echo "✗ Failed to start redis/workers."; exit 1; }
 fi
 
-# Start the UI on a free host port: if the preferred one is taken, walk up to
-# the next open port (9191 → 9192 → 9193 → …) and publish the UI there.
-start="$UI_PORT"
-while ! port_free "$UI_PORT"; do
-  echo "ℹ  Port $UI_PORT is already in use, trying $((UI_PORT + 1))…" >&2
-  UI_PORT=$((UI_PORT + 1))
-  if [ "$UI_PORT" -gt $((start + 1000)) ]; then
-    echo "✗ No free port in range $start-$UI_PORT; skipping the UI (scan continues)." >&2
-    UI_PORT=""; break
-  fi
-done
+# If THIS project's UI is already running, reuse it — don't bump to a new port or
+# recreate the container (a busy 9191 is usually just our own dashboard from a prior run).
 UI_URL=""
-if [ -n "$UI_PORT" ]; then
-  export GHASCAN_UI_PORT="$UI_PORT"
-  if dc up -d ui >/dev/null 2>&1; then
-    UI_URL="http://127.0.0.1:$UI_PORT"
-    echo "▶ Live dashboard: $UI_URL"
-  else
-    echo "⚠  UI did not start (scan continues)." >&2
+_ui_cid="$(dc ps -q ui 2>/dev/null)"
+if [ -n "$_ui_cid" ] && [ "$(docker inspect -f '{{.State.Running}}' "$_ui_cid" 2>/dev/null)" = "true" ]; then
+  # Recover the port from the running container's command (…--port N…).
+  cur=""; mapfile -t _a < <(docker inspect -f '{{range .Args}}{{println .}}{{end}}' "$_ui_cid" 2>/dev/null)
+  for ((i = 0; i < ${#_a[@]} - 1; i++)); do [ "${_a[i]}" = "--port" ] && cur="${_a[i+1]}"; done
+  [ -z "$cur" ] && cur="$UI_PORT"
+  UI_URL="http://127.0.0.1:$cur"
+  echo "▶ Reusing the running dashboard: $UI_URL"
+else
+  # UI not up: walk from the preferred port to the next free one and start it there.
+  start="$UI_PORT"
+  while ! port_free "$UI_PORT"; do
+    echo "ℹ  Port $UI_PORT is already in use, trying $((UI_PORT + 1))…" >&2
+    UI_PORT=$((UI_PORT + 1))
+    if [ "$UI_PORT" -gt $((start + 1000)) ]; then
+      echo "✗ No free port in range $start-$UI_PORT; skipping the UI (scan continues)." >&2
+      UI_PORT=""; break
+    fi
+  done
+  if [ -n "$UI_PORT" ]; then
+    export GHASCAN_UI_PORT="$UI_PORT"
+    if dc up -d ui >/dev/null 2>&1; then
+      UI_URL="http://127.0.0.1:$UI_PORT"
+      echo "▶ Live dashboard: $UI_URL"
+    else
+      echo "⚠  UI did not start (scan continues)." >&2
+    fi
   fi
 fi
 
