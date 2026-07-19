@@ -1653,7 +1653,7 @@ def analyze_offline_finding(raw_finding):
 def finding_to_dict(f):
     return {
         "severity": f.severity, "confidence": f.confidence, "stars": f.stars,
-        "repo": f.repo, "org_name": f.org_name, "org_type": f.org_type,
+        "repo": f.repo, "path": f.path, "org_name": f.org_name, "org_type": f.org_type,
         "repo_url": f.repo_url, "file_url": f.file_url, "security_url": f.security_url,
         "who_can_trigger": f.who_can_trigger, "explanation": f.explanation,
         "secrets_exposed": f.secrets_exposed, "permissions": f.permissions,

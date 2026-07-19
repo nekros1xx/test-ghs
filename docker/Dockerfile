@@ -15,9 +15,9 @@ RUN apt-get update \
 WORKDIR /app
 COPY . /app
 
-# Install the package (ui extra = rq+redis) + the prebuilt git_sparse wheel.
-# Drop a matching wheel into docker/wheels/ to avoid a Rust build.
-RUN pip install --no-cache-dir -e '.[ui]' pyyaml \
+# Install the package (ui = rq+redis, pdf = reportlab for `report --pdf`) + the
+# prebuilt git_sparse wheel. Drop a matching wheel into docker/wheels/ to avoid a Rust build.
+RUN pip install --no-cache-dir -e '.[ui,pdf]' pyyaml \
  && pip install --no-cache-dir --no-index --find-links /app/docker/wheels git_sparse
 
 ENV GHASCAN_DB=/data/ghascan.db \

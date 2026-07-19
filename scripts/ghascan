@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# ghascan — one-command wrapper around the dockerized producer/worker/collector
+# pipeline. Gives the classic single-command UX (ghascan --org X --pdf out.pdf)
+# while everything runs in Docker. Tokens live in the repo's .env; nothing to edit.
+set -uo pipefail
+
+# Locate the repo: honor $GHASCAN_HOME, else derive it from this script's path
+# (works both when run as ./scripts/ghascan and via the installed shim).
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+GHASCAN_HOME="${GHASCAN_HOME:-$(cd "$(dirname "$SELF")/.." && pwd)}"
+cd "$GHASCAN_HOME" || { echo "ghascan: no encuentro el repo (exporta GHASCAN_HOME=/ruta/al/repo)"; exit 1; }
+[ -f .env ] || echo "⚠  Falta $GHASCAN_HOME/.env — copia .env.example a .env y pon tu GITHUB_TOKEN." >&2
+
+dc() { docker compose "$@"; }
+
+# No args → passthrough help from the image.
+if [ $# -eq 0 ]; then dc run --rm producer --help; exit $?; fi
+
+# Ensure the infra is up (image is built by the installer; this is a fast no-op
+# once containers are running).
+if ! dc ps --status running --services 2>/dev/null | grep -q '^worker$'; then
+  echo "▶ Levantando el stack (redis + workers + ui)…"
+  dc up -d redis worker ui >/dev/null
+fi
+
+# Partition the classic-style args into enqueue (target/discovery) vs report (output/filter).
+ENQ=(); REP=(); OUTHOST=""; HAVE_TARGET=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pdf|--html|-o|--output)
+      base="$(basename "$2")"
+      case "$1" in -o|--output) REP+=(-o "/data/$base");; *) REP+=("$1" "/data/$base");; esac
+      OUTHOST="$GHASCAN_HOME/data/$base"; shift 2;;
+    --verdict)
+      REP+=(--verdict); shift
+      while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do REP+=("$1"); shift; done;;
+    -v|--verbose) REP+=(-v); shift;;
+    --scanned)    REP+=(--scanned); shift;;
+    --org)  ENQ+=(--org "$2");  REP+=(--org "$2"); HAVE_TARGET=1; shift 2;;
+    --repo) ENQ+=(--repo "$2"); REP+=(--repo "$2"); HAVE_TARGET=1; shift 2;;
+    --user) ENQ+=(--user "$2"); REP+=(--org "$2"); HAVE_TARGET=1; shift 2;;
+    --query|-q|--custom|-c|--all)
+      ENQ+=("$1"); [ "$1" != "--all" ] && { ENQ+=("$2"); shift; }; HAVE_TARGET=1; shift;;
+    --max-repos|--queue-high-water|--min-stars|--org-max-repos|--start-page|-s|--end-page|-e|--limit|-l)
+      ENQ+=("$1" "$2"); shift 2;;
+    --yolo|--no-subdivide) ENQ+=("$1"); shift;;
+    *) ENQ+=("$1"); shift;;
+  esac
+done
+
+# 1. Scan: enqueue the target, then wait for the workers to drain the queue.
+if [ "$HAVE_TARGET" -eq 1 ]; then
+  echo "▶ Encolando: ${ENQ[*]}"
+  dc run --rm producer enqueue "${ENQ[@]}" || exit 1
+  echo -n "▶ Escaneando"
+  while :; do
+    n="$(dc exec -T redis redis-cli llen rq:queue:default 2>/dev/null | tr -d '\r ')"
+    [ -z "$n" ] && n=0
+    [ "$n" = "0" ] && break
+    echo -n " .${n}"; sleep 2
+  done
+  echo " ✓"
+fi
+
+# 2. Report from the shared DB.
+echo "▶ Generando reporte…"
+dc run --rm producer report "${REP[@]}" || exit 1
+[ -n "$OUTHOST" ] && echo "✔ Reporte guardado en: $OUTHOST"

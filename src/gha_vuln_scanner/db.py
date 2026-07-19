@@ -182,7 +182,7 @@ def get_finding(repo: str, path: str) -> dict | None:
 def iter_findings(repo: str | None = None, org: str | None = None,
                   severities: set[str] | None = None):
     """Yield stored finding dicts, optionally filtered by repo/org/severity."""
-    sql = "SELECT repo, finding_json FROM findings"
+    sql = "SELECT repo, path, finding_json FROM findings"
     clauses, params = [], []
     if repo:
         clauses.append("repo = ?")
@@ -197,6 +197,10 @@ def iter_findings(repo: str | None = None, org: str | None = None,
             fd = json.loads(row["finding_json"])
         except (json.JSONDecodeError, TypeError):
             continue
+        # repo/path are authoritative columns; finding_json omits path, so
+        # backfill both here — report reconstruction requires them.
+        fd.setdefault("repo", row["repo"])
+        fd.setdefault("path", row["path"])
         if severities and fd.get("severity") not in severities:
             continue
         yield fd

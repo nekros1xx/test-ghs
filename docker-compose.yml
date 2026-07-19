@@ -62,13 +62,15 @@ services:
     restart: unless-stopped
     environment:
       GHASCAN_DB: /data/ghascan.db
-      # The chat panel runs the Claude Code CLI (baked into the image). Auth via an
-      # API key here, or mount your host ~/.claude for a subscription login (below).
+      # The chat panel runs the Claude Code CLI (baked into the image). Auth via a
+      # subscription OAuth token (from .env), an API key, or a mounted ~/.claude.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - ./data:/data
       # Uncomment to reuse your host's Claude Code auth instead of an API key:
       # - ${HOME}/.claude:/root/.claude
-    command: ["ui", "--host", "0.0.0.0", "--port", "8080"]
+    command: ["ui", "--host", "0.0.0.0", "--port", "9191"]
     ports:
-      - "8080:8080"
+      # loopback only, unique port to avoid clashes (8080 is taken by wplab_wordpress)
+      - "127.0.0.1:9191:9191"
