@@ -45,10 +45,12 @@ while ! port_free "$UI_PORT"; do
     UI_PORT=""; break
   fi
 done
+UI_URL=""
 if [ -n "$UI_PORT" ]; then
   export GHASCAN_UI_PORT="$UI_PORT"
   if dc up -d ui >/dev/null 2>&1; then
-    echo "▶ UI: http://127.0.0.1:$UI_PORT"
+    UI_URL="http://127.0.0.1:$UI_PORT"
+    echo "▶ Live dashboard: $UI_URL"
   else
     echo "⚠  UI did not start (scan continues)." >&2
   fi
@@ -96,4 +98,15 @@ fi
 # 2. Report from the shared DB.
 echo "▶ Generating report…"
 dc run --rm producer report "${REP[@]}" || exit 1
-[ -n "$OUTHOST" ] && echo "✔ Report saved to: $OUTHOST"
+
+# Final summary — printed last so it survives the scrollback from enqueue/report.
+echo
+echo "────────────────────────────────────────────────────────"
+[ -n "$OUTHOST" ] && echo "  ✔ Report saved to: $OUTHOST"
+if [ -n "$UI_URL" ]; then
+  echo "  📊 Live dashboard: $UI_URL"
+  echo "     (open it in a browser to explore findings; stop everything with 'docker compose down')"
+else
+  echo "  ⚠  UI is not running — start it with 'docker compose up -d ui'"
+fi
+echo "────────────────────────────────────────────────────────"
