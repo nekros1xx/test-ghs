@@ -2268,7 +2268,6 @@ def _build_parser(version):
     enq.add_argument('--queue-high-water', type=int, default=5000,
                      help='YOLO: pause enqueuing while queue depth exceeds this')
     enq.add_argument('--min-stars', type=int, default=0, help='Min stars filter (org/user)')
-    enq.add_argument('--org-max-repos', type=int, default=500, help='Cap repos per org/user')
     enq.add_argument('--start-page', '-s', type=int, default=1)
     enq.add_argument('--end-page', '-e', type=int, default=10)
     enq.add_argument('--no-subdivide', action='store_true')
@@ -2337,10 +2336,10 @@ def _cmd_enqueue(args):
         return
 
     if args.org:
-        repos = producer.resolve_org(args.org, args.org_max_repos, args.min_stars)
+        repos = producer.resolve_org(args.org, min_stars=args.min_stars)
         source, target = 'org', args.org
     elif args.user:
-        repos = producer.resolve_user(args.user, args.org_max_repos, args.min_stars)
+        repos = producer.resolve_user(args.user, min_stars=args.min_stars)
         source, target = 'user', args.user
     elif args.repo:
         repos = producer.resolve_repo(args.repo)

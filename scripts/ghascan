@@ -80,7 +80,7 @@ while [ $# -gt 0 ]; do
     --user) ENQ+=(--user "$2"); REP+=(--org "$2"); HAVE_TARGET=1; shift 2;;
     --query|-q|--custom|-c|--all)
       ENQ+=("$1"); [ "$1" != "--all" ] && { ENQ+=("$2"); shift; }; HAVE_TARGET=1; shift;;
-    --max-repos|--queue-high-water|--min-stars|--org-max-repos|--start-page|-s|--end-page|-e|--limit|-l)
+    --max-repos|--queue-high-water|--min-stars|--start-page|-s|--end-page|-e|--limit|-l)
       ENQ+=("$1" "$2"); shift 2;;
     --yolo|--no-subdivide) ENQ+=("$1"); shift;;
     *) ENQ+=("$1"); shift;;

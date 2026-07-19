@@ -30,11 +30,15 @@ def _repo_payload(full_name: str, stars: int = 0, org_type: str = "") -> dict:
 # ── resolvers → list[payload] ────────────────────────────────────────
 
 def _paginate_repos(base_url: str, max_repos: int, min_stars: int, org_type: str) -> list[dict]:
-    """Page through a GitHub repos listing endpoint, filtering fork/archived/stars."""
+    """Page through a GitHub repos listing endpoint, filtering fork/archived/stars.
+
+    max_repos <= 0 means no cap — walk every page until the whole listing is
+    exhausted (the default for org/user scans: you want the entire org).
+    """
     from gha_vuln_scanner.scanner import api_request
 
     out, page, per_page = [], 1, 100
-    while len(out) < max_repos:
+    while max_repos <= 0 or len(out) < max_repos:
         sep = "&" if "?" in base_url else "?"
         data, _, _ = api_request(f"{base_url}{sep}per_page={per_page}&page={page}")
         if not data or not isinstance(data, list):
@@ -48,15 +52,15 @@ def _paginate_repos(base_url: str, max_repos: int, min_stars: int, org_type: str
         if len(data) < per_page:
             break
         page += 1
-    return out[:max_repos]
+    return out if max_repos <= 0 else out[:max_repos]
 
 
-def resolve_org(org: str, max_repos: int = 500, min_stars: int = 0) -> list[dict]:
+def resolve_org(org: str, max_repos: int = 0, min_stars: int = 0) -> list[dict]:
     url = f"https://api.github.com/orgs/{org}/repos?type=public&sort=stars&direction=desc"
     return _paginate_repos(url, max_repos, min_stars, "Organization")
 
 
-def resolve_user(user: str, max_repos: int = 500, min_stars: int = 0) -> list[dict]:
+def resolve_user(user: str, max_repos: int = 0, min_stars: int = 0) -> list[dict]:
     url = f"https://api.github.com/users/{user}/repos?type=owner&sort=updated"
     return _paginate_repos(url, max_repos, min_stars, "User")
 
