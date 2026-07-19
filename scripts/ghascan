@@ -56,20 +56,26 @@ if [ -n "$UI_PORT" ]; then
   fi
 fi
 
-# Partition the classic-style args into enqueue (target/discovery) vs report (output/filter).
-ENQ=(); REP=(); OUTHOST=""; HAVE_TARGET=0
+# Partition the classic-style args:
+#   ORGS[]  — one or more orgs; --org accepts a comma list (--org a,b,c)
+#   ENQ[]   — enqueue flags (discovery + limits, plus --repo/--user targets)
+#   REP[]   — report-only filters/flags (-v, --verdict, --scanned, --repo/--user)
+#   OUT_*   — a single output flag (--pdf/--html/-o), kept apart so it can be
+#             suffixed per-org when several orgs are scanned.
+ENQ=(); REP=(); ORGS=(); OUT_FLAG=""; OUT_NAME=""; OUT_FILES=(); HAVE_TARGET=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --pdf|--html|-o|--output)
-      base="$(basename "$2")"
-      case "$1" in -o|--output) REP+=(-o "/data/$base");; *) REP+=("$1" "/data/$base");; esac
-      OUTHOST="$GHASCAN_HOME/data/$base"; shift 2;;
+    --pdf|--html) OUT_FLAG="$1"; OUT_NAME="$(basename "$2")"; shift 2;;
+    -o|--output)  OUT_FLAG="-o"; OUT_NAME="$(basename "$2")"; shift 2;;
     --verdict)
       REP+=(--verdict); shift
       while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do REP+=("$1"); shift; done;;
     -v|--verbose) REP+=(-v); shift;;
     --scanned)    REP+=(--scanned); shift;;
-    --org)  ENQ+=(--org "$2");  REP+=(--org "$2"); HAVE_TARGET=1; shift 2;;
+    --org)
+      IFS=',' read -ra _orgs <<< "$2"
+      for _o in "${_orgs[@]}"; do _o="${_o// /}"; [ -n "$_o" ] && ORGS+=("$_o"); done
+      HAVE_TARGET=1; shift 2;;
     --repo) ENQ+=(--repo "$2"); REP+=(--repo "$2"); HAVE_TARGET=1; shift 2;;
     --user) ENQ+=(--user "$2"); REP+=(--org "$2"); HAVE_TARGET=1; shift 2;;
     --query|-q|--custom|-c|--all)
@@ -81,10 +87,31 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# 1. Scan: enqueue the target, then wait for the workers to drain the queue.
+# Build the report output arg for a filename suffix (empty = no suffix), and record
+# the resolved host path in OUT_FILES for the final summary.
+report_out_args=()
+build_out() {  # $1 = suffix
+  report_out_args=()
+  [ -z "$OUT_FLAG" ] && return
+  local name="$OUT_NAME"
+  if [ -n "$1" ]; then
+    if [[ "$OUT_NAME" == *.* ]]; then name="${OUT_NAME%.*}-$1.${OUT_NAME##*.}"; else name="${OUT_NAME}-$1"; fi
+  fi
+  report_out_args=("$OUT_FLAG" "/data/$name")
+  OUT_FILES+=("$GHASCAN_HOME/data/$name")
+}
+
+# 1. Scan: enqueue each target, then wait once for the workers to drain the queue.
 if [ "$HAVE_TARGET" -eq 1 ]; then
-  echo "▶ Enqueuing: ${ENQ[*]}"
-  dc run --rm producer enqueue "${ENQ[@]}" || exit 1
+  if [ "${#ORGS[@]}" -gt 0 ]; then
+    for org in "${ORGS[@]}"; do
+      echo "▶ Enqueuing org: $org"
+      dc run --rm producer enqueue --org "$org" "${ENQ[@]}" || exit 1
+    done
+  else
+    echo "▶ Enqueuing: ${ENQ[*]}"
+    dc run --rm producer enqueue "${ENQ[@]}" || exit 1
+  fi
   echo -n "▶ Scanning"
   while :; do
     n="$(dc exec -T redis redis-cli llen rq:queue:default 2>/dev/null | tr -d '\r ')"
@@ -95,14 +122,27 @@ if [ "$HAVE_TARGET" -eq 1 ]; then
   echo " ✓"
 fi
 
-# 2. Report from the shared DB.
+# 2. Report from the shared DB: one report per org (with per-org output files when
+# several orgs are scanned), otherwise a single report honoring any --repo/--user filter.
 echo "▶ Generating report…"
-dc run --rm producer report "${REP[@]}" || exit 1
+if [ "${#ORGS[@]}" -gt 1 ]; then
+  for org in "${ORGS[@]}"; do
+    echo "──── $org ────"
+    build_out "$org"
+    dc run --rm producer report --org "$org" "${REP[@]}" "${report_out_args[@]}" || exit 1
+  done
+elif [ "${#ORGS[@]}" -eq 1 ]; then
+  build_out ""
+  dc run --rm producer report --org "${ORGS[0]}" "${REP[@]}" "${report_out_args[@]}" || exit 1
+else
+  build_out ""
+  dc run --rm producer report "${REP[@]}" "${report_out_args[@]}" || exit 1
+fi
 
 # Final summary — printed last so it survives the scrollback from enqueue/report.
 echo
 echo "────────────────────────────────────────────────────────"
-[ -n "$OUTHOST" ] && echo "  ✔ Report saved to: $OUTHOST"
+for f in "${OUT_FILES[@]}"; do echo "  ✔ Report saved to: $f"; done
 if [ -n "$UI_URL" ]; then
   echo "  📊 Live dashboard: $UI_URL"
   echo "     (open it in a browser to explore findings; stop everything with 'docker compose down')"
