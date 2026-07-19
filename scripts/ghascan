@@ -8,19 +8,50 @@ set -uo pipefail
 # (works both when run as ./scripts/ghascan and via the installed shim).
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 GHASCAN_HOME="${GHASCAN_HOME:-$(cd "$(dirname "$SELF")/.." && pwd)}"
-cd "$GHASCAN_HOME" || { echo "ghascan: no encuentro el repo (exporta GHASCAN_HOME=/ruta/al/repo)"; exit 1; }
-[ -f .env ] || echo "⚠  Falta $GHASCAN_HOME/.env — copia .env.example a .env y pon tu GITHUB_TOKEN." >&2
+cd "$GHASCAN_HOME" || { echo "ghascan: cannot find the repo (set GHASCAN_HOME=/path/to/repo)"; exit 1; }
+
+UI_PORT="${GHASCAN_UI_PORT:-9191}"
+
+if [ ! -f .env ]; then
+  echo "⚠  Missing $GHASCAN_HOME/.env — copy .env.example to .env and set your GITHUB_TOKEN." >&2
+elif ! grep -qE '^GITHUB_TOKEN=[^[:space:]]+' .env; then
+  echo "⚠  GITHUB_TOKEN is empty in .env — the scan will run ANONYMOUSLY (GitHub's 60 req/hr" >&2
+  echo "   limit) and results will be incomplete. Edit .env and re-run." >&2
+fi
 
 dc() { docker compose "$@"; }
+
+# True when nothing is listening on the given loopback TCP port.
+port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 # No args → passthrough help from the image.
 if [ $# -eq 0 ]; then dc run --rm producer --help; exit $?; fi
 
-# Ensure the infra is up (image is built by the installer; this is a fast no-op
-# once containers are running).
+# Ensure the infra is up. redis + workers are REQUIRED for the scan; the UI is
+# best-effort (a busy port must not abort the run).
 if ! dc ps --status running --services 2>/dev/null | grep -q '^worker$'; then
-  echo "▶ Levantando el stack (redis + workers + ui)…"
-  dc up -d redis worker ui >/dev/null
+  echo "▶ Starting the stack (redis + workers)…"
+  dc up -d redis worker >/dev/null || { echo "✗ Failed to start redis/workers."; exit 1; }
+fi
+
+# Start the UI on a free host port: if the preferred one is taken, walk up to
+# the next open port (9191 → 9192 → 9193 → …) and publish the UI there.
+start="$UI_PORT"
+while ! port_free "$UI_PORT"; do
+  echo "ℹ  Port $UI_PORT is already in use, trying $((UI_PORT + 1))…" >&2
+  UI_PORT=$((UI_PORT + 1))
+  if [ "$UI_PORT" -gt $((start + 1000)) ]; then
+    echo "✗ No free port in range $start-$UI_PORT; skipping the UI (scan continues)." >&2
+    UI_PORT=""; break
+  fi
+done
+if [ -n "$UI_PORT" ]; then
+  export GHASCAN_UI_PORT="$UI_PORT"
+  if dc up -d ui >/dev/null 2>&1; then
+    echo "▶ UI: http://127.0.0.1:$UI_PORT"
+  else
+    echo "⚠  UI did not start (scan continues)." >&2
+  fi
 fi
 
 # Partition the classic-style args into enqueue (target/discovery) vs report (output/filter).
@@ -50,9 +81,9 @@ done
 
 # 1. Scan: enqueue the target, then wait for the workers to drain the queue.
 if [ "$HAVE_TARGET" -eq 1 ]; then
-  echo "▶ Encolando: ${ENQ[*]}"
+  echo "▶ Enqueuing: ${ENQ[*]}"
   dc run --rm producer enqueue "${ENQ[@]}" || exit 1
-  echo -n "▶ Escaneando"
+  echo -n "▶ Scanning"
   while :; do
     n="$(dc exec -T redis redis-cli llen rq:queue:default 2>/dev/null | tr -d '\r ')"
     [ -z "$n" ] && n=0
@@ -63,6 +94,6 @@ if [ "$HAVE_TARGET" -eq 1 ]; then
 fi
 
 # 2. Report from the shared DB.
-echo "▶ Generando reporte…"
+echo "▶ Generating report…"
 dc run --rm producer report "${REP[@]}" || exit 1
-[ -n "$OUTHOST" ] && echo "✔ Reporte guardado en: $OUTHOST"
+[ -n "$OUTHOST" ] && echo "✔ Report saved to: $OUTHOST"

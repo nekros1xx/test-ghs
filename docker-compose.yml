@@ -60,6 +60,11 @@ services:
   ui:
     <<: *ghascan-image
     restart: unless-stopped
+    # Host networking so the UI process binds the host's loopback DIRECTLY —
+    # it listens on 127.0.0.1, never 0.0.0.0. This is safe here because the UI
+    # only reads the shared SQLite DB (no Redis), so it needs no compose network.
+    # Linux-only (host networking); on Docker Desktop use a published port instead.
+    network_mode: host
     environment:
       GHASCAN_DB: /data/ghascan.db
       # The chat panel runs the Claude Code CLI (baked into the image). Auth via a
@@ -70,7 +75,6 @@ services:
       - ./data:/data
       # Uncomment to reuse your host's Claude Code auth instead of an API key:
       # - ${HOME}/.claude:/root/.claude
-    command: ["ui", "--host", "0.0.0.0", "--port", "9191"]
-    ports:
-      # loopback only, unique port to avoid clashes (8080 is taken by wplab_wordpress)
-      - "127.0.0.1:9191:9191"
+    # Bind loopback only; port configurable via GHASCAN_UI_PORT (default 9191).
+    # The wrapper auto-picks a free port when the default is taken.
+    command: ["ui", "--host", "127.0.0.1", "--port", "${GHASCAN_UI_PORT:-9191}"]
