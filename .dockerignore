@@ -1,0 +1,11 @@
+.git
+data
+**/__pycache__
+*.pyc
+.venv
+venv
+*.egg-info
+cloned_repos
+gha_scan_*.json
+gha_scan_*.md
+tasks

@@ -367,181 +367,6 @@ def get_file_content(owner, repo_name, path):
     return None
 
 
-import subprocess as _subprocess, tempfile as _tempfile, shutil as _shutil
-import stat as _stat
-
-
-def _rmtree_safe(path):
-    """shutil.rmtree that handles read-only .git files on Windows."""
-    def _on_error(func, fpath, exc_info):
-        try:
-            os.chmod(fpath, _stat.S_IWRITE)
-            func(fpath)
-        except Exception:
-            pass
-    _shutil.rmtree(path, onerror=_on_error)
-
-_CLONE_DIR = None
-_clone_cache = {}
-_clone_lock = _threading.Lock()
-
-
-def git_clone_repo(owner, repo_name):
-    repo_key = f"{owner}/{repo_name}"
-    with _clone_lock:
-        if repo_key in _clone_cache:
-            return _clone_cache[repo_key]
-
-    clone_dir = _CLONE_DIR or os.path.join(os.getcwd(), 'cloned_repos')
-    dest = os.path.join(clone_dir, f"{owner}__{repo_name}")
-
-    if os.path.exists(dest):
-        with _clone_lock:
-            _clone_cache[repo_key] = dest
-        return dest
-
-    url = f"https://github.com/{owner}/{repo_name}.git"
-    token = _next_token()
-    if token:
-        url = f"https://x-access-token:{token}@github.com/{owner}/{repo_name}.git"
-
-    try:
-        result = _subprocess.run(
-            ['git', 'clone', '--depth=1', '--filter=blob:none', '--sparse', url, dest],
-            capture_output=True, text=True, timeout=60
-        )
-        if result.returncode != 0:
-            print(f"  {C.YELLOW}⚠ Clone failed for {repo_key}: {result.stderr[:100]}{C.RESET}")
-            with _clone_lock:
-                _clone_cache[repo_key] = None
-            return None
-
-        _subprocess.run(
-            ['git', 'sparse-checkout', 'set', '.github'],
-            capture_output=True, text=True, timeout=30, cwd=dest
-        )
-        _subprocess.run(
-            ['git', 'checkout'],
-            capture_output=True, text=True, timeout=30, cwd=dest
-        )
-
-        with _clone_lock:
-            _clone_cache[repo_key] = dest
-        return dest
-    except Exception as e:
-        print(f"  {C.YELLOW}⚠ Clone error for {repo_key}: {e}{C.RESET}")
-        with _clone_lock:
-            _clone_cache[repo_key] = None
-        return None
-
-
-def get_file_content_from_clone(clone_path, file_path):
-    full_path = os.path.join(clone_path, file_path)
-    if os.path.isfile(full_path):
-        try:
-            with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
-                return f.read()
-        except:
-            return None
-    return None
-
-
-def get_all_workflow_files(clone_path):
-    wf_dir = os.path.join(clone_path, '.github', 'workflows')
-    if not os.path.isdir(wf_dir):
-        return []
-    files = []
-    for f in os.listdir(wf_dir):
-        if f.endswith(('.yml', '.yaml')) and not any(f.endswith(ext) for ext in SKIP_EXTENSIONS):
-            files.append(os.path.join('.github', 'workflows', f))
-    return files
-
-
-_USE_CLONE = False
-
-
-def _enrich_one(c, cache, cache_lock, min_stars):
-    repo = c["repo"]
-    with cache_lock:
-        cached_info = cache.get(repo)
-    if cached_info is None:
-        info = get_repo_info(c["owner"], c["repo_name"])
-        with cache_lock:
-            cache[repo] = info
-    else:
-        info = cached_info
-    if not info: return None, "api_fail"
-    if info["fork"]: return None, "forks"
-    if info["archived"]: return None, "archived"
-    if info["stars"] < min_stars: return None, "low_stars"
-
-    content = None
-    clone_path = None
-    other_workflows = {}
-
-    if _USE_CLONE:
-        clone_path = git_clone_repo(c["owner"], c["repo_name"])
-        if clone_path:
-            content = get_file_content_from_clone(clone_path, c["path"])
-            for wf_path in get_all_workflow_files(clone_path):
-                if wf_path != c["path"]:
-                    wf_content = get_file_content_from_clone(clone_path, wf_path)
-                    if wf_content:
-                        other_workflows[wf_path] = wf_content
-
-    if not content:
-        content = get_file_content(c["owner"], c["repo_name"], c["path"])
-
-    if not content: return None, "no_content"
-
-    f = Finding(
-        repo=repo, path=c["path"], stars=info["stars"],
-        org_name=info["org_name"], org_type=info["org_type"],
-        repo_url=f"https://github.com/{repo}",
-        file_url=f"https://github.com/{repo}/blob/HEAD/{c['path']}",
-        security_url=f"https://github.com/{repo}/security",
-        workflow_content=content,
-        content_hash=hashlib.sha256(content.encode()).hexdigest()[:16],
-        query_id=c.get('query_id', -1),
-        query_name=c.get('query_name', ''),
-    )
-    f._other_workflows = other_workflows
-    f._clone_path = clone_path
-    return f, "ok"
-
-
-def enrich(candidates, min_stars=0):
-    import concurrent.futures, threading
-    enriched = []
-    cache = {}
-    cache_lock = threading.Lock()
-    stats = Counter()
-    total = len(candidates)
-    workers = max(token_count(), 1)
-
-    print(f"   Checking stars + fetching workflows... ({workers} parallel workers)\n")
-
-    done_count = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_enrich_one, c, cache, cache_lock, min_stars): i
-                   for i, c in enumerate(candidates)}
-        for future in concurrent.futures.as_completed(futures):
-            done_count += 1
-            if done_count % 10 == 0 or done_count == 1:
-                print(f"   📊 {done_count}/{total} checked | {len(enriched)} findings so far")
-            try:
-                result, reason = future.result()
-                if result:
-                    enriched.append(result)
-                elif reason != "ok":
-                    stats[reason] += 1
-            except Exception as e:
-                stats["error"] += 1
-
-    print(f"\n   📊 Enrichment done: {len(enriched)} viable | "
-          f"skipped: {stats['low_stars']} low_stars, {stats['forks']} forks, "
-          f"{stats['archived']} archived")
-    return enriched
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -2406,345 +2231,249 @@ def export_pdf(findings, outpath):
 
 
 # ════════════════════════════════════════════════════════════════════
-#  SCAN HISTORY — track scanned orgs to avoid re-scanning
-# ════════════════════════════════════════════════════════════════════
-
-_SCAN_HISTORY_DIR = os.path.join(os.path.expanduser('~'), '.ghascan')
-_SCAN_HISTORY_FILE = os.path.join(_SCAN_HISTORY_DIR, 'scan_history.json')
-
-
-def _load_scan_history():
-    """Load the scan history from disk. Returns dict {org_name: metadata}."""
-    if not os.path.exists(_SCAN_HISTORY_FILE):
-        return {}
-    try:
-        with open(_SCAN_HISTORY_FILE, encoding='utf-8') as fp:
-            return json.load(fp)
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _save_scan_history(history):
-    """Persist scan history to disk."""
-    os.makedirs(_SCAN_HISTORY_DIR, exist_ok=True)
-    with open(_SCAN_HISTORY_FILE, 'w', encoding='utf-8') as fp:
-        json.dump(history, fp, indent=2, ensure_ascii=False)
-
-
-def _record_org_scan(org_name, repos_scanned, findings_count):
-    """Record that an org was scanned."""
-    history = _load_scan_history()
-    history[org_name.lower()] = {
-        'org': org_name,
-        'scanned_at': datetime.now().isoformat(),
-        'repos_scanned': repos_scanned,
-        'findings': findings_count,
-    }
-    _save_scan_history(history)
-
-
-def _is_org_scanned(org_name):
-    """Check if an org was already scanned. Returns metadata dict or None."""
-    history = _load_scan_history()
-    return history.get(org_name.lower())
-
-
-def _flush_org(org_name):
-    """Remove a single org from scan history. Returns True if it existed."""
-    history = _load_scan_history()
-    key = org_name.lower()
-    if key in history:
-        del history[key]
-        _save_scan_history(history)
-        return True
-    return False
-
-
-def _flush_all():
-    """Clear all scan history."""
-    _save_scan_history({})
-
-
-def _print_scanned_orgs():
-    """Print all scanned orgs with metadata."""
-    history = _load_scan_history()
-    if not history:
-        print(f"  {C.DIM}No orgs in scan history.{C.RESET}")
-        return
-    print(f"\n{C.BOLD}📋 Scanned organizations ({len(history)}):{C.RESET}\n")
-    for key in sorted(history.keys()):
-        entry = history[key]
-        org = entry.get('org', key)
-        ts = entry.get('scanned_at', '?')
-        repos = entry.get('repos_scanned', '?')
-        findings = entry.get('findings', '?')
-        color = C.GREEN if findings == 0 else C.YELLOW if isinstance(findings, int) and findings > 0 else ''
-        print(f"  {C.BOLD}{org}{C.RESET}  {C.DIM}{ts}{C.RESET}  "
-              f"repos:{repos}  {color}findings:{findings}{C.RESET}")
-    print()
-
-
-def scan_org(org_name, max_repos=500, min_stars=0, use_clone=True):
-    print(f"\n{C.BOLD}🏢 Scanning organization: {org_name}{C.RESET}")
-    print(f"   Fetching repo list (max {max_repos})...\n")
-    repos = []
-    page = 1
-    per_page = 100
-    while len(repos) < max_repos:
-        data, _, _ = api_request(
-            f"https://api.github.com/orgs/{org_name}/repos"
-            f"?per_page={per_page}&page={page}&type=public&sort=stars&direction=desc"
-        )
-        if not data or not isinstance(data, list) or len(data) == 0:
-            break
-        repos.extend(data)
-        if len(data) < per_page:
-            break
-        page += 1
-    repos = repos[:max_repos]
-    print(f"   📦 Found {len(repos)} public repos\n")
-    if not repos:
-        print(f"   {C.RED}❌ No repos found for org {org_name}{C.RESET}")
-        _record_org_scan(org_name, 0, 0)
-        return []
-    active_repos = []
-    for r in repos:
-        if r.get('fork') or r.get('archived'): continue
-        if r.get('stargazers_count', 0) < min_stars: continue
-        active_repos.append(r)
-    print(f"   📊 {len(active_repos)} active repos\n")
-    all_findings = []
-    for ri, repo_data in enumerate(active_repos):
-        owner = repo_data['owner']['login']
-        repo_name_short = repo_data['name']
-        full_name = repo_data['full_name']
-        stars = repo_data.get('stargazers_count', 0)
-        print(f"   [{ri+1}/{len(active_repos)}] {full_name} ⭐{stars}")
-        clone_path = None
-        workflow_files = []
-        if use_clone:
-            clone_path = git_clone_repo(owner, repo_name_short)
-            if clone_path:
-                workflow_files = get_all_workflow_files(clone_path)
-        if not workflow_files and not clone_path:
-            data, status, _ = api_request(
-                f"https://api.github.com/repos/{full_name}/contents/.github/workflows"
-            )
-            if data and isinstance(data, list):
-                workflow_files = [
-                    f".github/workflows/{f['name']}" for f in data
-                    if f['name'].endswith(('.yml', '.yaml'))
-                    and not any(f['name'].endswith(ext) for ext in SKIP_EXTENSIONS)
-                ]
-        if not workflow_files:
-            print(f"      📭 No workflows"); continue
-        print(f"      📄 {len(workflow_files)} workflow(s)")
-        for wf_path in workflow_files:
-            content = None
-            if clone_path:
-                content = get_file_content_from_clone(clone_path, wf_path)
-            if not content:
-                content = get_file_content(owner, repo_name_short, wf_path)
-            if not content: continue
-            f = Finding(
-                repo=full_name, path=wf_path, stars=stars,
-                org_name=owner, org_type='Organization',
-                repo_url=f"https://github.com/{full_name}",
-                file_url=f"https://github.com/{full_name}/blob/HEAD/{wf_path}",
-                security_url=f"https://github.com/{full_name}/security",
-                workflow_content=content,
-                content_hash=hashlib.sha256(content.encode()).hexdigest()[:16],
-                query_id=-1, query_name='org-scan',
-            )
-            f._clone_path = clone_path
-            f._other_workflows = {}
-            if clone_path:
-                other_wfs = {}
-                for owf in workflow_files:
-                    if owf != wf_path:
-                        owf_content = get_file_content_from_clone(clone_path, owf)
-                        if owf_content: other_wfs[owf] = owf_content
-                f._other_workflows = other_wfs
-            analyze(f)
-            if f.severity and f.severity != 'FALSE_POSITIVE':
-                all_findings.append(f)
-                _print_finding_terminal(f)
-        if ri < len(active_repos) - 1 and ri % 10 == 9:
-            print(f"\n      {dim('⏳ Brief pause...')}"); time.sleep(2)
-    _record_org_scan(org_name, len(active_repos), len(all_findings))
-    return all_findings
-
-
-# ════════════════════════════════════════════════════════════════════
 #  CLI (main entry point)
 # ════════════════════════════════════════════════════════════════════
 
-def main():
-    from gha_vuln_scanner import __version__
+def _add_token_arg(p):
+    p.add_argument('--token', type=str,
+                   help='GitHub PAT(s), comma-separated (else uses GITHUB_TOKEN env)')
+
+
+def _add_redis_arg(p):
+    p.add_argument('--redis', type=str, metavar='URL',
+                   help='Redis/Valkey URL (else REDIS_URL env or localhost)')
+
+
+def _build_parser(version):
     parser = argparse.ArgumentParser(
-        description=f'GHA Vulnerability Scanner v{__version__} — by Sergio Cabrera (https://linkedin.com/in/sergio-cabrera-878766239/)')
-    parser.add_argument('--query', '-q', type=int, help='Query number (1-43)')
-    parser.add_argument('--custom', '-c', type=str, help='Custom search query')
-    parser.add_argument('--all', action='store_true', help='Run all queries')
-    parser.add_argument('--start-page', '-s', type=int, default=1)
-    parser.add_argument('--end-page', '-e', type=int, default=10)
-    parser.add_argument('--no-subdivide', action='store_true')
-    parser.add_argument('--min-stars', type=int, default=0, help='Min stars filter')
-    parser.add_argument('--limit', '-l', type=int, default=0)
-    parser.add_argument('--offline', type=str, help='Analyze existing scan JSON')
-    parser.add_argument('-o', '--output', type=str, help='Output JSON path')
-    parser.add_argument('--html', type=str, help='Output HTML report path')
-    parser.add_argument('--pdf', type=str, help='Output PDF report path')
-    parser.add_argument('--clone', action='store_true')
-    parser.add_argument('--org', type=str, help='Scan all repos in a GitHub org')
-    parser.add_argument('--org-max-repos', type=int, default=500)
-    parser.add_argument('--force', action='store_true', help='Re-scan org even if already scanned')
-    parser.add_argument('--flush', action='store_true', help='Flush all scanned orgs from history')
-    parser.add_argument('-F', '--flush-org', type=str, metavar='ORG', help='Flush a specific org from scan history')
-    parser.add_argument('--scanned', action='store_true', help='List all scanned orgs')
-    parser.add_argument('-v', '--verbose', action='store_true')
-    parser.add_argument('--verdict', nargs='+')
-    parser.add_argument('--version', action='version', version=f'gha-vuln-scanner {__version__}')
-    args = parser.parse_args()
+        prog='ghascan',
+        description=f'GHA Vulnerability Scanner v{version} — producer/worker/collector for '
+                    f'GitHub Actions workflow vulnerabilities (by Sergio Cabrera)')
+    parser.add_argument('--version', action='version', version=f'gha-vuln-scanner {version}')
+    sub = parser.add_subparsers(dest='cmd')
 
-    global _USE_CLONE, _CLONE_DIR
+    # ── enqueue (producer) ──
+    enq = sub.add_parser('enqueue', help='Resolve targets and enqueue per-repo jobs')
+    g = enq.add_mutually_exclusive_group(required=True)
+    g.add_argument('--org', type=str, help='Enqueue all repos in a GitHub org')
+    g.add_argument('--user', type=str, help='Enqueue all repos owned by a GitHub user')
+    g.add_argument('--repo', type=str, metavar='OWNER/NAME', help='Enqueue a single repo')
+    g.add_argument('--query', '-q', type=int, help='Enqueue repos found by query 1-43')
+    g.add_argument('--custom', '-c', type=str, help='Enqueue repos found by a custom query')
+    g.add_argument('--all', action='store_true', help='Enqueue repos found by all queries')
+    g.add_argument('--yolo', action='store_true',
+                   help='💀 Enqueue EVERY public repo on GitHub (never-ending firehose)')
+    enq.add_argument('--max-repos', type=int, default=0,
+                     help='YOLO: stop after N repos (0 = forever)')
+    enq.add_argument('--queue-high-water', type=int, default=5000,
+                     help='YOLO: pause enqueuing while queue depth exceeds this')
+    enq.add_argument('--min-stars', type=int, default=0, help='Min stars filter (org/user)')
+    enq.add_argument('--org-max-repos', type=int, default=500, help='Cap repos per org/user')
+    enq.add_argument('--start-page', '-s', type=int, default=1)
+    enq.add_argument('--end-page', '-e', type=int, default=10)
+    enq.add_argument('--no-subdivide', action='store_true')
+    enq.add_argument('--limit', '-l', type=int, default=0)
+    _add_token_arg(enq); _add_redis_arg(enq)
 
-    # ── Scan history management commands ───────────────────────────
-    if args.flush:
-        _flush_all()
-        print(f"  {C.GREEN}✓ Scan history flushed.{C.RESET}")
+    # ── worker (consumer) ──
+    wrk = sub.add_parser('worker', help='Run a worker that downloads + analyzes repos')
+    wrk.add_argument('--burst', action='store_true', help='Process queued jobs then exit')
+    wrk.add_argument('--sink', choices=('redis', 'db'), default='redis',
+                     help="Where results go: 'redis' (a separate collector) or "
+                          "'db' (write straight to the shared SQLite)")
+    _add_token_arg(wrk); _add_redis_arg(wrk)
+
+    # ── ui (live dashboard) ──
+    ui = sub.add_parser('ui', help='Serve the live findings dashboard')
+    ui.add_argument('--host', default='0.0.0.0')
+    ui.add_argument('--port', type=int, default=8080)
+
+    # ── collect ──
+    col = sub.add_parser('collect', help='Drain worker results into the database')
+    col.add_argument('--once', action='store_true', help='Drain current backlog then exit')
+    col.add_argument('--idle-timeout', type=int, default=0,
+                     help='Stop after N idle seconds (0 = run forever)')
+    _add_redis_arg(col)
+
+    # ── report (reads DB) ──
+    rep = sub.add_parser('report', help='Report findings from the database')
+    rep.add_argument('--scanned', action='store_true', help='List scanned repos')
+    rep.add_argument('--org', type=str, help='Filter findings by org/owner')
+    rep.add_argument('--repo', type=str, metavar='OWNER/NAME', help='Filter by a single repo')
+    rep.add_argument('-o', '--output', type=str, help='Write findings JSON')
+    rep.add_argument('--html', type=str, help='Write HTML report')
+    rep.add_argument('--pdf', type=str, help='Write PDF report')
+    rep.add_argument('-v', '--verbose', action='store_true')
+    rep.add_argument('--verdict', nargs='+')
+
+    # ── offline (synchronous, local) ──
+    off = sub.add_parser('offline', help='Re-analyze an existing scan JSON (no network)')
+    off.add_argument('file', help='Path to a scan JSON produced earlier')
+    off.add_argument('-o', '--output', type=str)
+    off.add_argument('--html', type=str)
+    off.add_argument('--pdf', type=str)
+    off.add_argument('--limit', '-l', type=int, default=0)
+    off.add_argument('-v', '--verbose', action='store_true')
+    off.add_argument('--verdict', nargs='+')
+
+    # ── flush ──
+    fl = sub.add_parser('flush', help='Flush stored state from the database')
+    fl.add_argument('--org', type=str, help='Only flush this org/owner or owner/name repo')
+
+    return parser
+
+
+def _cmd_enqueue(args):
+    from gha_vuln_scanner import producer
+    from gha_vuln_scanner.tokens import set_tokens, has_token
+    if args.token:
+        set_tokens(args.token)
+    if not has_token():
+        print(f"  {C.YELLOW}⚠  No token — enumeration will hit the 60 req/hr anon limit.{C.RESET}")
+
+    if args.yolo:
+        producer.run_yolo(redis_url=args.redis, max_repos=args.max_repos,
+                          queue_high_water=args.queue_high_water)
         return
-
-    if args.flush_org:
-        if _flush_org(args.flush_org):
-            print(f"  {C.GREEN}✓ Flushed '{args.flush_org}' from scan history.{C.RESET}")
-        else:
-            print(f"  {C.YELLOW}⚠  '{args.flush_org}' not found in scan history.{C.RESET}")
-        return
-
-    if args.scanned:
-        _print_scanned_orgs()
-        return
-
-    if args.offline:
-        print(f"{C.BOLD}📂 Offline mode: {args.offline}{C.RESET}")
-        with open(args.offline, encoding='utf-8') as fp:
-            data = json.load(fp)
-        raw = data.get('findings', data if isinstance(data, list) else [])
-        if args.limit > 0: raw = raw[:args.limit]
-        findings = [analyze_offline_finding(rf) for rf in raw]
-        md_path = _md_path_from_json(args.output or args.offline)
-        _md_init(md_path, f'offline: {args.offline}')
-        for f in findings: _md_append_finding(md_path, f)
-        _md_finalize(md_path, findings)
-        print_summary(findings)
-        if args.verbose:
-            print_details(findings, min_stars=args.min_stars,
-                         verdict_filter=set(args.verdict) if args.verdict else None)
-        if args.output: export_json(findings, args.output)
-        if args.html: export_html(findings, args.html)
-        if args.pdf: export_pdf(findings, args.pdf)
-        return
-
-    if args.clone or args.org:
-        _USE_CLONE = True
-        _CLONE_DIR = os.path.join(os.getcwd(), 'cloned_repos')
-        os.makedirs(_CLONE_DIR, exist_ok=True)
 
     if args.org:
-        # Check if org was already scanned
-        if not args.force:
-            prev = _is_org_scanned(args.org)
-            if prev:
-                print(f"\n  {C.YELLOW}⚠  '{args.org}' already scanned on {prev.get('scanned_at', '?')}{C.RESET}")
-                print(f"     repos: {prev.get('repos_scanned', '?')}  findings: {prev.get('findings', '?')}")
-                print(f"     Use {C.BOLD}--force{C.RESET} to re-scan, or {C.BOLD}-F {args.org}{C.RESET} to flush it.\n")
-                return
+        repos = producer.resolve_org(args.org, args.org_max_repos, args.min_stars)
+        source, target = 'org', args.org
+    elif args.user:
+        repos = producer.resolve_user(args.user, args.org_max_repos, args.min_stars)
+        source, target = 'user', args.user
+    elif args.repo:
+        repos = producer.resolve_repo(args.repo)
+        source, target = 'repo', args.repo
+    else:
+        if args.all:
+            query_ids = sorted(QUERIES.keys())
+        elif args.query is not None:
+            if args.query not in QUERIES:
+                print(f"{C.RED}❌ Unknown query {args.query}. Valid: 1-{max(QUERIES.keys())}{C.RESET}")
+                sys.exit(1)
+            query_ids = [args.query]
+        else:  # custom
+            QUERIES[0] = ("Custom", args.custom)
+            query_ids = [0]
+        repos = producer.resolve_query(query_ids, args.start_page, args.end_page,
+                                       not args.no_subdivide, limit=args.limit)
+        source = 'query'
+        target = 'all' if args.all else (f'q{args.query}' if args.query is not None else 'custom')
 
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        out = args.output or f"gha_scan_org_{args.org}_{ts}.json"
-        md_path = _md_path_from_json(out)
-        _md_init(md_path, f'org: {args.org}')
-        findings = scan_org(args.org, max_repos=args.org_max_repos,
-                           min_stars=args.min_stars, use_clone=_USE_CLONE)
-        if findings:
-            findings.sort(key=lambda f: -f.stars)
-            for f in findings: _md_append_finding(md_path, f)
-            _md_finalize(md_path, findings)
-            print_summary(findings)
-            if args.verbose:
-                print_details(findings, min_stars=args.min_stars,
-                             verdict_filter=set(args.verdict) if args.verdict else None)
-            export_json(findings, out)
-            if args.html: export_html(findings, args.html)
-            if args.pdf: export_pdf(findings, args.pdf)
-        else:
-            print(f"\n📭 No vulnerabilities found in {args.org}")
-        if _CLONE_DIR and os.path.exists(_CLONE_DIR):
-            _rmtree_safe(_CLONE_DIR)
+    if not repos:
+        print(f"  {C.YELLOW}⚠  No repos resolved for {source}:{target}{C.RESET}")
+        return
+    producer.enqueue_repos(repos, source, target, redis_url=args.redis)
+
+
+def _cmd_worker(args):
+    from gha_vuln_scanner import worker
+    from gha_vuln_scanner.tokens import set_tokens
+    if args.token:
+        set_tokens(args.token)
+    worker.run_worker(url=args.redis, burst=args.burst, sink=args.sink)
+
+
+def _cmd_ui(args):
+    from gha_vuln_scanner import ui
+    ui.run_ui(host=args.host, port=args.port)
+
+
+def _cmd_collect(args):
+    from gha_vuln_scanner import collector
+    collector.run_collector(url=args.redis, once=args.once, idle_timeout=args.idle_timeout)
+
+
+def _reconstruct(fd):
+    """Rebuild a Finding from a stored finding dict (re-runs analysis)."""
+    rf = dict(fd)
+    rf.setdefault('url', fd.get('file_url', ''))
+    return analyze_offline_finding(rf)
+
+
+def _cmd_report(args):
+    from gha_vuln_scanner import db
+    db.init_db()
+    if args.scanned:
+        rows = db.list_scanned()
+        if not rows:
+            print(f"  {C.DIM}No repos scanned yet.{C.RESET}")
+            return
+        print(f"\n{C.BOLD}📋 Scanned repos ({len(rows)}):{C.RESET}\n")
+        for r in rows:
+            color = C.GREEN if r['findings'] == 0 else C.YELLOW
+            print(f"  {C.BOLD}{r['full_name']}{C.RESET}  {C.DIM}{r['last_scanned_at']}{C.RESET}  "
+                  f"⭐{r['stars']}  {color}findings:{r['findings']}{C.RESET}")
+        print()
         return
 
-    if args.all: query_ids = sorted(QUERIES.keys())
-    elif args.query:
-        if args.query not in QUERIES:
-            print(f"{C.RED}❌ Unknown query {args.query}. Valid: 1-{max(QUERIES.keys())}{C.RESET}")
-            sys.exit(1)
-        query_ids = [args.query]
-    elif args.custom:
-        QUERIES[0] = ("Custom", args.custom); query_ids = [0]
-    else:
-        parser.print_help()
-        print(f"\n{C.BOLD}Queries:{C.RESET}")
-        for qn, (name, _) in sorted(QUERIES.items()):
-            print(f"  {qn:>2}: {name}")
-        sys.exit(0)
-
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    label = 'all' if args.all else (f'q{args.query}' if args.query else 'custom')
-    out = args.output or f"gha_scan_{label}_{ts}.json"
-    md_path = _md_path_from_json(out)
-    _md_init(md_path, ', '.join(f"Q{q}" for q in query_ids))
-
-    all_findings = []
-    global_seen = set()
-
-    for qi, qid in enumerate(query_ids):
-        qname = QUERIES[qid][0]
-        print(f"\n{'═'*60}\n  {C.BOLD}[{qi+1}/{len(query_ids)}] Q{qid}: {qname}{C.RESET}\n{'═'*60}")
-        candidates = discover([qid], args.start_page, args.end_page,
-                              not args.no_subdivide, limit=args.limit)
-        if not candidates: continue
-        new_candidates = []
-        for c in candidates:
-            key = f"{c['repo']}:{c['path']}"
-            if key not in global_seen:
-                global_seen.add(key); new_candidates.append(c)
-        candidates = new_candidates
-        if not candidates: continue
-        enriched = enrich(candidates, min_stars=args.min_stars)
-        if not enriched: continue
-        for f in enriched:
-            analyze(f)
-            all_findings.append(f)
-            _md_append_finding(md_path, f)
-            _print_finding_terminal(f)
-        export_json(all_findings, out)
-        if qi < len(query_ids) - 1:
-            time.sleep(15)
-
-    if not all_findings:
-        print("📭 No findings."); return
-    all_findings.sort(key=lambda f: -f.stars)
-    _md_finalize(md_path, all_findings)
-    print_summary(all_findings)
+    fds = list(db.iter_findings(repo=args.repo, org=args.org))
+    if not fds:
+        print("📭 No findings in database for that filter.")
+        return
+    findings = [_reconstruct(fd) for fd in fds]
+    findings.sort(key=lambda f: -f.stars)
+    print_summary(findings)
     if args.verbose:
-        print_details(all_findings, min_stars=args.min_stars,
-                     verdict_filter=set(args.verdict) if args.verdict else None)
-    export_json(all_findings, out)
-    if args.html: export_html(all_findings, args.html)
-    if args.pdf: export_pdf(all_findings, args.pdf)
-    if _USE_CLONE and _CLONE_DIR and os.path.exists(_CLONE_DIR):
-        _rmtree_safe(_CLONE_DIR)
+        print_details(findings, min_stars=0,
+                      verdict_filter=set(args.verdict) if args.verdict else None)
+    if args.output: export_json(findings, args.output)
+    if args.html: export_html(findings, args.html)
+    if args.pdf: export_pdf(findings, args.pdf)
+
+
+def _cmd_offline(args):
+    print(f"{C.BOLD}📂 Offline mode: {args.file}{C.RESET}")
+    with open(args.file, encoding='utf-8') as fp:
+        data = json.load(fp)
+    raw = data.get('findings', data if isinstance(data, list) else [])
+    if args.limit > 0:
+        raw = raw[:args.limit]
+    findings = [analyze_offline_finding(rf) for rf in raw]
+    md_path = _md_path_from_json(args.output or args.file)
+    _md_init(md_path, f'offline: {args.file}')
+    for f in findings:
+        _md_append_finding(md_path, f)
+    _md_finalize(md_path, findings)
+    print_summary(findings)
+    if args.verbose:
+        print_details(findings, min_stars=0,
+                      verdict_filter=set(args.verdict) if args.verdict else None)
+    if args.output: export_json(findings, args.output)
+    if args.html: export_html(findings, args.html)
+    if args.pdf: export_pdf(findings, args.pdf)
+
+
+def _cmd_flush(args):
+    from gha_vuln_scanner import db
+    db.init_db()
+    n = db.flush(args.org)
+    if args.org:
+        print(f"  {C.GREEN}✓ Flushed {n} repo(s) matching '{args.org}'.{C.RESET}")
+    else:
+        print(f"  {C.GREEN}✓ Flushed all state ({n} repo(s)).{C.RESET}")
+
+
+def main():
+    from gha_vuln_scanner import __version__
+    parser = _build_parser(__version__)
+    args = parser.parse_args()
+
+    dispatch = {
+        'enqueue': _cmd_enqueue,
+        'worker': _cmd_worker,
+        'ui': _cmd_ui,
+        'collect': _cmd_collect,
+        'report': _cmd_report,
+        'offline': _cmd_offline,
+        'flush': _cmd_flush,
+    }
+    handler = dispatch.get(args.cmd)
+    if handler is None:
+        parser.print_help()
+        sys.exit(0)
+    handler(args)
 
 
 if __name__ == '__main__':

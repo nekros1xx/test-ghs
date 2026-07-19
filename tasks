@@ -1,0 +1,16 @@
+
+
+
+# producer
+- add arguments to scan organizations, users, and a single repo
+- PAT -> can be a cli argument or a ENV var
+- Add job queue https://python-rq.org/ to create a producer and a consumer
+
+
+# consumer
+- pull the data from the database 
+- Add https://github.com/lsproule/check_me_out 
+  this repo does sparse checkouts in memory in rust
+- checkout the repo has known_files=[lista_de_hashes_que_conoce] known_files -> ignores files that we already know about
+- process the new or changed files returned to you and update the database 
+

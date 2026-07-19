@@ -39,10 +39,26 @@ dependencies = []
 [project.optional-dependencies]
 yaml = ["pyyaml>=6.0"]
 pdf = ["reportlab>=4.0"]
-all = ["pyyaml>=6.0", "reportlab>=4.0"]
+# Producer + collector nodes (talk to Redis/Valkey, hold the SQLite DB):
+queue = ["rq>=1.15", "redis>=5.0"]
+# UI node (dashboard + Claude Code chat about findings).
+# The chat panel shells out to the `claude` CLI — install Claude Code separately
+# (npm i -g @anthropic-ai/claude-code) and authenticate it; no Python SDK needed.
+ui = ["rq>=1.15", "redis>=5.0"]
+# Worker nodes additionally need git_sparse (in-memory sparse checkout).
+# git_sparse is NOT on PyPI — installed from git via a PEP 508 direct reference:
+worker = [
+    "rq>=1.15",
+    "redis>=5.0",
+    "pyyaml>=6.0",
+    "git_sparse @ git+https://github.com/lsproule/check_me_out",
+]
+all = ["pyyaml>=6.0", "reportlab>=4.0", "rq>=1.15", "redis>=5.0"]
 dev = [
     "pyyaml>=6.0",
     "reportlab>=4.0",
+    "rq>=1.15",
+    "redis>=5.0",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff>=0.4.0",
@@ -57,6 +73,10 @@ Issues = "https://github.com/nekros1xx/ghascan/issues"
 
 [project.scripts]
 ghascan = "gha_vuln_scanner.cli:main"
+
+[tool.hatch.metadata]
+# Required for the git_sparse direct reference in the `worker` extra.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gha_vuln_scanner"]

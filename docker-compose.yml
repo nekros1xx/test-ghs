@@ -1,0 +1,74 @@
+# ghascan YOLO stack: producer + 3 workers + redis + live UI, all sharing one SQLite DB.
+#
+#   1. put your token in a .env file next to this one:   GITHUB_TOKEN=ghp_xxx
+#   2. docker compose up --build
+#   3. open http://localhost:8080  and watch findings roll in
+#
+# The SQLite database lives on the host at ./data/ghascan.db and is mounted into every
+# service at /data, so producer, workers and UI all read/write the same file.
+
+x-ghascan-image: &ghascan-image
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  image: ghascan:latest
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  producer:
+    <<: *ghascan-image
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GHASCAN_DB: /data/ghascan.db
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./data:/data
+    # 💀 enumerate every public repo on GitHub, throttling when the queue is deep.
+    command: ["enqueue", "--yolo", "--queue-high-water", "3000"]
+
+  worker:
+    <<: *ghascan-image
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GHASCAN_DB: /data/ghascan.db
+      REDIS_URL: redis://redis:6379/0
+      GHASCAN_SINK: db
+    volumes:
+      - ./data:/data
+    # Workers write findings straight into the shared SQLite (sink=db).
+    command: ["worker", "--sink", "db"]
+    deploy:
+      replicas: 3
+
+  ui:
+    <<: *ghascan-image
+    restart: unless-stopped
+    environment:
+      GHASCAN_DB: /data/ghascan.db
+      # The chat panel runs the Claude Code CLI (baked into the image). Auth via an
+      # API key here, or mount your host ~/.claude for a subscription login (below).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./data:/data
+      # Uncomment to reuse your host's Claude Code auth instead of an API key:
+      # - ${HOME}/.claude:/root/.claude
+    command: ["ui", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "8080:8080"

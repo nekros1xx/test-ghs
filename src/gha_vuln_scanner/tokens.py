@@ -24,8 +24,25 @@ def _load_tokens() -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
+def set_tokens(tokens: list[str] | str | None) -> None:
+    """Explicitly set the token list (e.g. from a CLI --token argument).
+
+    Takes precedence over the GITHUB_TOKEN environment variable. Accepts a list,
+    a single comma-separated string, or None (which reverts to env loading).
+    """
+    global _TOKENS, _token_idx
+    if tokens is None:
+        _TOKENS = []
+    elif isinstance(tokens, str):
+        _TOKENS = [t.strip() for t in tokens.split(",") if t.strip()]
+    else:
+        _TOKENS = [t.strip() for t in tokens if t and t.strip()]
+    with _token_lock:
+        _token_idx = 0
+
+
 def get_tokens() -> list[str]:
-    """Get all configured tokens."""
+    """Get all configured tokens (CLI-provided via set_tokens, else env)."""
     global _TOKENS
     if not _TOKENS:
         _TOKENS = _load_tokens()

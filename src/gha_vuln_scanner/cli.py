@@ -56,22 +56,23 @@ def main():
         print(f"  By {__author__} — {__author_url__}\033[0m")
         print()
 
-    # Check for token before doing anything
+    # Check for token before doing anything. Only the network subcommands
+    # (enqueue/worker) need one; a --token flag also satisfies it downstream.
     from gha_vuln_scanner.tokens import has_token
     if not has_token():
-        if len(sys.argv) > 1 and "--help" not in sys.argv and "-h" not in sys.argv:
-            is_offline = "--offline" in sys.argv
-            is_version = "--version" in sys.argv
-            is_history_cmd = "--flush" in sys.argv or "-F" in sys.argv or "--flush-org" in sys.argv or "--scanned" in sys.argv
-            if not is_offline and not is_version and not is_history_cmd:
-                print("\033[93m⚠  No GITHUB_TOKEN found.\033[0m")
-                if sys.platform == "win32":
-                    print('   Set it with: set GITHUB_TOKEN=ghp_your_token_here')
-                    print('   Or permanent: setx GITHUB_TOKEN "ghp_your_token_here"')
-                else:
-                    print("   Set it with: export GITHUB_TOKEN='ghp_your_token_here'")
-                print("   Without a token, API rate limits are very restrictive (60 req/hr).")
-                print("   Get a token at: https://github.com/settings/tokens\n")
+        needs_token = any(c in sys.argv for c in ("enqueue", "worker"))
+        has_token_flag = "--token" in sys.argv
+        wants_help = "--help" in sys.argv or "-h" in sys.argv
+        if needs_token and not has_token_flag and not wants_help:
+            print("\033[93m⚠  No GITHUB_TOKEN found.\033[0m")
+            if sys.platform == "win32":
+                print('   Set it with: set GITHUB_TOKEN=ghp_your_token_here')
+                print('   Or permanent: setx GITHUB_TOKEN "ghp_your_token_here"')
+            else:
+                print("   Set it with: export GITHUB_TOKEN='ghp_your_token_here'")
+            print("   Or pass --token ghp_...   (works with comma-separated tokens too)")
+            print("   Without a token, API rate limits are very restrictive (60 req/hr).")
+            print("   Get a token at: https://github.com/settings/tokens\n")
 
     # Import and run the scanner
     from gha_vuln_scanner.scanner import main as scanner_main
