@@ -1737,16 +1737,6 @@ def print_summary(findings):
         ai_risk_count = sum(1 for f in findings if f.ai_risk)
         if ai_risk_count: print(f"    {C.MAGENTA}🤖{C.RESET} AI prompt injection risks: {ai_risk_count}")
 
-    fps = [f for f in findings if f.severity == 'FALSE_POSITIVE']
-    if fps:
-        rules = Counter()
-        for f in fps:
-            for e in f.eliminated_vulns: rules[e.rule] += 1
-        print(f"\n  {dim('FALSE POSITIVE BREAKDOWN:')}")
-        for rule, cnt in rules.most_common():
-            print(f"    {dim(f'{rule:<20} {cnt}')}")
-
-
 def _print_finding_terminal(f):
     if f.severity == 'FALSE_POSITIVE':
         return
@@ -2409,7 +2399,9 @@ def _cmd_report(args):
 
     fds = list(db.iter_findings(repo=args.repo, org=args.org))
     if not fds:
-        print("📭 No findings in database for that filter.")
+        target = args.repo or args.org or "the scanned repos"
+        print(f"📭 Nothing flagged for {target} — its repositories either have no "
+              f"GitHub Actions workflows or none were found vulnerable.")
         return
     findings = [_reconstruct(fd) for fd in fds]
     findings.sort(key=lambda f: -f.stars)

@@ -25,7 +25,7 @@ dc() { docker compose "$@"; }
 port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 # No args → passthrough help from the image.
-if [ $# -eq 0 ]; then dc run --rm producer --help; exit $?; fi
+if [ $# -eq 0 ]; then dc run --rm -e GHASCAN_NO_BANNER=1 producer --help; exit $?; fi
 
 # Ensure the infra is up. redis + workers are REQUIRED for the scan; the UI is
 # best-effort (a busy port must not abort the run).
@@ -117,11 +117,11 @@ if [ "$HAVE_TARGET" -eq 1 ]; then
   if [ "${#ORGS[@]}" -gt 0 ]; then
     for org in "${ORGS[@]}"; do
       echo "▶ Enqueuing org: $org"
-      dc run --rm producer enqueue --org "$org" "${ENQ[@]}" || exit 1
+      dc run --rm -e GHASCAN_NO_BANNER=1 producer enqueue --org "$org" "${ENQ[@]}" || exit 1
     done
   else
     echo "▶ Enqueuing: ${ENQ[*]}"
-    dc run --rm producer enqueue "${ENQ[@]}" || exit 1
+    dc run --rm -e GHASCAN_NO_BANNER=1 producer enqueue "${ENQ[@]}" || exit 1
   fi
   echo -n "▶ Scanning"
   while :; do
@@ -140,14 +140,14 @@ if [ "${#ORGS[@]}" -gt 1 ]; then
   for org in "${ORGS[@]}"; do
     echo "──── $org ────"
     build_out "$org"
-    dc run --rm producer report --org "$org" "${REP[@]}" "${report_out_args[@]}" || exit 1
+    dc run --rm -e GHASCAN_NO_BANNER=1 producer report --org "$org" "${REP[@]}" "${report_out_args[@]}" || exit 1
   done
 elif [ "${#ORGS[@]}" -eq 1 ]; then
   build_out ""
-  dc run --rm producer report --org "${ORGS[0]}" "${REP[@]}" "${report_out_args[@]}" || exit 1
+  dc run --rm -e GHASCAN_NO_BANNER=1 producer report --org "${ORGS[0]}" "${REP[@]}" "${report_out_args[@]}" || exit 1
 else
   build_out ""
-  dc run --rm producer report "${REP[@]}" "${report_out_args[@]}" || exit 1
+  dc run --rm -e GHASCAN_NO_BANNER=1 producer report "${REP[@]}" "${report_out_args[@]}" || exit 1
 fi
 
 # Final summary — printed last so it survives the scrollback from enqueue/report.

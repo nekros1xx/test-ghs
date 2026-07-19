@@ -42,9 +42,10 @@ def main():
 
     from gha_vuln_scanner import __version__, __author__, __author_url__
 
-    # Show banner (only in interactive terminals)
+    # Show banner (only in interactive terminals; GHASCAN_NO_BANNER suppresses it,
+    # e.g. the wrapper that invokes the CLI many times per run).
     is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
-    if is_tty:
+    if is_tty and not os.environ.get("GHASCAN_NO_BANNER"):
         print(f"\033[1m")
         print(f"   ██████╗ ██╗  ██╗ █████╗     ███████╗ ██████╗ █████╗ ███╗   ██╗")
         print(f"  ██╔════╝ ██║  ██║██╔══██╗    ██╔════╝██╔════╝██╔══██╗████╗  ██║")
