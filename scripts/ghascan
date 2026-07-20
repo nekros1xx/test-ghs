@@ -10,6 +10,12 @@ SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 GHASCAN_HOME="${GHASCAN_HOME:-$(cd "$(dirname "$SELF")/.." && pwd)}"
 cd "$GHASCAN_HOME" || { echo "ghascan: cannot find the repo (set GHASCAN_HOME=/path/to/repo)"; exit 1; }
 
+# Run containers as the host user so files written to ./data are owned by you
+# (not root) — otherwise `rm -rf` can't clean them up. Pre-create ./data as the
+# host user so Docker doesn't auto-create it as root on first mount.
+export GHASCAN_UID="$(id -u)" GHASCAN_GID="$(id -g)"
+mkdir -p data
+
 UI_PORT="${GHASCAN_UI_PORT:-9191}"
 
 if [ ! -f .env ]; then

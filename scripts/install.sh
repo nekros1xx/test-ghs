@@ -23,7 +23,9 @@ if [ ! -f "$REPO/.env" ]; then
   echo "⚠  Created $REPO/.env from the template. EDIT it and set your GITHUB_TOKEN before scanning."
 fi
 
-# 3. Build the image
+# 3. Pre-create ./data as the host user (so Docker doesn't create it as root),
+#    then build the image.
+mkdir -p "$REPO/data"
 echo "▶ Building the image (this takes a while the first time)…"
 ( cd "$REPO" && docker compose build )
 

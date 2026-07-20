@@ -27,6 +27,9 @@ services:
   producer:
     <<: *ghascan-image
     restart: unless-stopped
+    # Run as the host user (set by the wrapper) so files written to ./data are
+    # owned by you, not root — otherwise a plain `rm -rf` can't clean them up.
+    user: "${GHASCAN_UID:-0}:${GHASCAN_GID:-0}"
     depends_on:
       redis:
         condition: service_healthy
@@ -34,6 +37,7 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GHASCAN_DB: /data/ghascan.db
       REDIS_URL: redis://redis:6379/0
+      HOME: /tmp
     volumes:
       - ./data:/data
     # 💀 enumerate every public repo on GitHub, throttling when the queue is deep.
@@ -42,6 +46,7 @@ services:
   worker:
     <<: *ghascan-image
     restart: unless-stopped
+    user: "${GHASCAN_UID:-0}:${GHASCAN_GID:-0}"
     depends_on:
       redis:
         condition: service_healthy
@@ -50,6 +55,7 @@ services:
       GHASCAN_DB: /data/ghascan.db
       REDIS_URL: redis://redis:6379/0
       GHASCAN_SINK: db
+      HOME: /tmp
     volumes:
       - ./data:/data
     # Workers write findings straight into the shared SQLite (sink=db).
@@ -65,8 +71,10 @@ services:
     # only reads the shared SQLite DB (no Redis), so it needs no compose network.
     # Linux-only (host networking); on Docker Desktop use a published port instead.
     network_mode: host
+    user: "${GHASCAN_UID:-0}:${GHASCAN_GID:-0}"
     environment:
       GHASCAN_DB: /data/ghascan.db
+      HOME: /tmp
       # The chat panel runs the Claude Code CLI (baked into the image). Auth via a
       # subscription OAuth token (from .env), an API key, or a mounted ~/.claude.
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
